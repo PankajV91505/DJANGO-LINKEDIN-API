@@ -86,7 +86,6 @@ async def scrape_linkedin_jobs():
             except Exception as e:
                 await browser.close()
                 return {"scraped": 0, "error": f"Failed to load page: {e}"}
-
         await asyncio.sleep(5)
         scraped_titles = set()
         total_scraped = 0
@@ -134,9 +133,23 @@ async def scrape_linkedin_jobs():
                         description_html = await page.locator("div.jobs-description-content__text--stretch").inner_html()
 
                     soup = BeautifulSoup(description_html, "html.parser")
-                    full_text = soup.get_text(separator="\n")
-                    description = extract_about_the_job(full_text)
 
+                    # Try to find the heading and the specific div.mt4 after it
+                    about_heading = soup.find('h2', string=lambda s: s and "about the job" in s.lower())
+                    if about_heading:
+                        mt4_div = about_heading.find_next('div', class_='mt4')
+                        if mt4_div:
+                            # Get clean text inside the mt4 div
+                            description = mt4_div.get_text(separator="\n", strip=True)
+                        else:
+                            # fallback to full text parsing if mt4 div not found
+                            description = extract_about_the_job(soup.get_text(separator="\n"))
+                    else:
+                        # fallback if heading not found
+                        description = extract_about_the_job(soup.get_text(separator="\n"))
+
+                        description = description.strip() 
+                          
                     job_data = {
                         "title": title,
                         "company": company,
