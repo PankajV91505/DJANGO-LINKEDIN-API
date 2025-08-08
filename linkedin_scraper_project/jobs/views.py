@@ -9,6 +9,20 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 from asgiref.sync import sync_to_async, async_to_sync
 import re
 from bs4 import BeautifulSoup
+from rest_framework.generics import ListAPIView
+from rest_framework.pagination import PageNumberPagination
+from .serializers import JobSerializer
+
+
+class JobPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 50
+
+class JobListAPIView(ListAPIView):
+    queryset = Job.objects.all().order_by('-id')
+    serializer_class = JobSerializer
+    pagination_class = JobPagination
 
 # Human-like scroll
 async def human_scroll(page, duration=6):
