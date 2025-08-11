@@ -12,7 +12,34 @@ from bs4 import BeautifulSoup
 from rest_framework.generics import ListAPIView
 from rest_framework.pagination import PageNumberPagination
 from .serializers import JobSerializer
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+from django.shortcuts import get_object_or_404
 
+@api_view(['GET', 'POST'])
+def job_create_list(request):
+    if request.method == 'GET':
+        return JobListAPIView.as_view()(request._request)
+    elif request.method == 'POST':
+        serializer = JobSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['PUT', 'DELETE'])
+def job_update_delete(request, pk):
+    job = get_object_or_404(Job, pk=pk)
+    if request.method == 'PUT':
+        serializer = JobSerializer(job, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    elif request.method == 'DELETE':
+        job.delete()
+        return Response({"message": "Deleted"}, status=status.HTTP_204_NO_CONTENT)
 
 class JobPagination(PageNumberPagination):
     page_size = 10
@@ -24,36 +51,31 @@ class JobListAPIView(ListAPIView):
     serializer_class = JobSerializer
     pagination_class = JobPagination
 
-# Human-like scroll
 async def human_scroll(page, duration=6):
     start = time.time()
     while time.time() - start < duration:
         await page.mouse.wheel(0, random.randint(300, 600))
         await asyncio.sleep(random.uniform(1, 1.5))
 
-# Save job to DB
 @sync_to_async
 def save_job_to_db(job_data):
     Job.objects.create(**job_data)
 
-# Convert '2 days ago' to date like '3 August'
 def parse_time_posted(time_str):
     try:
         time_str = time_str.lower()
         if "hour" in time_str or "minute" in time_str:
             post_date = datetime.now()
-            return post_date.strftime("%#d %B")  # Windows compatible
-        if "day" in time_str:
+        elif "day" in time_str:
             days_ago = int(time_str.split()[0])
-            if 1 <= days_ago <= 6:
-                post_date = datetime.now() - timedelta(days=days_ago)
-                return post_date.strftime("%#d %B")
-        return time_str
+            post_date = datetime.now() - timedelta(days=days_ago)
+        else:
+            return time_str
+        return post_date.strftime("%d %B")
     except Exception as e:
         print("⚠️ Error parsing time_posted:", e)
         return time_str
 
-# Extract only "About the job" section from full description
 def extract_about_the_job(text):
     try:
         lines = text.splitlines()
@@ -66,8 +88,7 @@ def extract_about_the_job(text):
             return "About the job section not found."
         extracted = []
         for line in lines[start_idx:]:
-            if any(heading in line.lower() for heading in [
-                "about the company", "job details", "qualifications", "skills", "education"]):
+            if any(heading in line.lower() for heading in ["about the company", "job details", "qualifications", "skills", "education"]):
                 break
             extracted.append(line.strip())
         return "\n".join([line for line in extracted if line])
@@ -75,7 +96,6 @@ def extract_about_the_job(text):
         print("⚠️ Error extracting 'About the job':", e)
         return "Error parsing description."
 
-# Scraper Logic
 async def scrape_linkedin_jobs():
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=False, slow_mo=80)
@@ -100,6 +120,7 @@ async def scrape_linkedin_jobs():
             except Exception as e:
                 await browser.close()
                 return {"scraped": 0, "error": f"Failed to load page: {e}"}
+
         await asyncio.sleep(5)
         scraped_titles = set()
         total_scraped = 0
@@ -117,28 +138,25 @@ async def scrape_linkedin_jobs():
                 if total_scraped >= 100:
                     break
                 try:
+                    await job.scroll_into_view_if_needed()
                     await job.click()
                     await asyncio.sleep(random.uniform(3, 4))
 
-                    title = await page.locator("h1.t-24").text_content() or "Unknown"
-                    title = title.strip()
+                    title = (await page.locator("h1.t-24").text_content() or "Unknown").strip()
                     if title in scraped_titles:
                         continue
                     scraped_titles.add(title)
 
-                    company = await page.locator("div.job-details-jobs-unified-top-card__company-name a").text_content() or "Unknown"
-                    company = company.strip()
+                    company = (await page.locator("div.job-details-jobs-unified-top-card__company-name a").text_content() or "Unknown").strip()
+                    meta_info = (await page.locator("div.job-details-jobs-unified-top-card__primary-description-container span").nth(0).text_content() or "Unknown").strip()
 
-                    meta_info = await page.locator("div.job-details-jobs-unified-top-card__primary-description-container span").nth(0).text_content() or "Unknown"
-                    meta_info = meta_info.strip()
                     parts = [p.strip() for p in meta_info.split("\u00b7")]
                     location = parts[0] if len(parts) > 0 else "Unknown"
                     raw_time_posted = parts[1] if len(parts) > 1 else "Unknown"
                     time_posted = parse_time_posted(raw_time_posted)
 
-                    see_more_button = page.locator("button.show-more-less-html__button")
-                    if await see_more_button.is_visible():
-                        await see_more_button.click()
+                    if await page.locator("button.show-more-less-html__button").is_visible():
+                        await page.locator("button.show-more-less-html__button").click()
                         await page.wait_for_timeout(1500)
 
                     try:
@@ -147,23 +165,14 @@ async def scrape_linkedin_jobs():
                         description_html = await page.locator("div.jobs-description-content__text--stretch").inner_html()
 
                     soup = BeautifulSoup(description_html, "html.parser")
-
-                    # Try to find the heading and the specific div.mt4 after it
                     about_heading = soup.find('h2', string=lambda s: s and "about the job" in s.lower())
                     if about_heading:
                         mt4_div = about_heading.find_next('div', class_='mt4')
-                        if mt4_div:
-                            # Get clean text inside the mt4 div
-                            description = mt4_div.get_text(separator="\n", strip=True)
-                        else:
-                            # fallback to full text parsing if mt4 div not found
-                            description = extract_about_the_job(soup.get_text(separator="\n"))
+                        description = mt4_div.get_text(separator="\n", strip=True) if mt4_div else extract_about_the_job(soup.get_text(separator="\n"))
                     else:
-                        # fallback if heading not found
                         description = extract_about_the_job(soup.get_text(separator="\n"))
+                    description = description.strip()
 
-                        description = description.strip() 
-                          
                     job_data = {
                         "title": title,
                         "company": company,
@@ -173,11 +182,9 @@ async def scrape_linkedin_jobs():
                         "scraped_date": date.today(),
                         "scraped_time": datetime.now().time(),
                     }
-
                     await save_job_to_db(job_data)
                     total_scraped += 1
                     print(f"✅ Scraped {total_scraped}: {title} @ {company} - {time_posted}")
-
                 except Exception as e:
                     print(f"⚠️ Job scrape failed: {e}")
                     continue
@@ -196,7 +203,6 @@ async def scrape_linkedin_jobs():
         await browser.close()
         return {"scraped": total_scraped}
 
-# View to trigger scraping
 def trigger_scraper(request):
     try:
         result = async_to_sync(scrape_linkedin_jobs)()
@@ -204,7 +210,6 @@ def trigger_scraper(request):
     except Exception as e:
         return JsonResponse({"error": str(e)})
 
-# Homepage view
 def homepage(request):
     return HttpResponse("""
         <h1>LinkedIn Job Scraper API</h1>
